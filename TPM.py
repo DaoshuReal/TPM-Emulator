@@ -101,6 +101,7 @@ class TPM:
         # Command table
         self.commandTable = {}
         self.commandTable[TPM_CC["Startup"]] = self.handleStartup
+        self.commandTable[TPM_CC["Shutdown"]] = self.handleShutdown
 
     def _parseHeader(self, headerBytes: bytes):
         tag = int.from_bytes(headerBytes[:2], 'big')
@@ -121,15 +122,12 @@ class TPM:
             return self._errorResponse(tag, TPM_RC_COMMAND_CODE)
         
     def handleStartup(self, tag, commandBytes: bytes) -> bytes:
-        # TPM command size check
         if len(commandBytes) < 12:
             return self._errorResponse(tag, TPM_RC_FAILURE)
 
-        # TPM already started
         if self.started:
             return self._errorResponse(tag, TPM_RC_INITIALIZE)
 
-        # Parse Startup type
         startupType = int.from_bytes(commandBytes[10:12], "big")
 
         if startupType == TPM_SU_CLEAR:
@@ -146,15 +144,41 @@ class TPM:
             # Reset NV counters (volatile state), but keep NV storage intact
             self.nv_counters = {k:0 for k in self.nv_counters}
         elif startupType == TPM_SU_STATE:
-            # Do nothing for PCRs or volatile state
+            # TPM_SU_STATE preserves PCRs and volatile state
             pass
         else:
-            # Invalid Startup type
             return self._errorResponse(tag, TPM_RC_FAILURE)
 
-        # Mark TPM as started
         self.started = True
-
-        # Build success response
         responseSize = 10
         return tag.to_bytes(2, 'big') + responseSize.to_bytes(4, 'big') + TPM_RC_SUCCESS.to_bytes(4, 'big')
+
+    def handleShutdown(self, tag, commandBytes: bytes) -> bytes:
+        if len(commandBytes) < 12:
+            return self._errorResponse(tag, TPM_RC_FAILURE)
+
+        if not self.started:
+            # Cannot shutdown if not started
+            return self._errorResponse(tag, TPM_RC_INITIALIZE)
+
+        shutdownType = int.from_bytes(commandBytes[10:12], "big")
+
+        if shutdownType == TPM_SU_CLEAR:
+            # Clear volatile state for next Startup
+            self.sessions = {}
+            self.keys = {}
+            self.hierarchies = {"owner": None, "endorsement": None, "platform": None}
+            self.pcrs = [b'\x00' * 32 for _ in range(24)]
+            self.nv_counters = {k:0 for k in self.nv_counters}
+
+        elif shutdownType == TPM_SU_STATE:
+            # Preserve PCRs and volatile state
+            pass
+        else:
+            return self._errorResponse(tag, TPM_RC_FAILURE)
+
+        # Mark TPM as stopped
+        self.started = False
+
+        responseSize = 10
+        return tag.to_bytes(2,'big') + responseSize.to_bytes(4,'big') + TPM_RC_SUCCESS.to_bytes(4,'big')
